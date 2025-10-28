@@ -16,7 +16,7 @@ const initWebSocket = (server) => {
   wss.on('connection', (ws) => {
     console.log('New WebSocket connection');
 
-    ws.on('message', (message) => {
+    ws.on('message', async (message) => {
       console.log('Received raw message:', message.toString());
       try {
         const data = JSON.parse(message);
@@ -54,502 +54,434 @@ const initWebSocket = (server) => {
             connectedUsers.set(authenticatedUserId, { 
               ws, 
               userId: authenticatedUserId, 
-              username: authenticatedUsername,
-              sessionId: sessionId,
-              rooms: new Set() 
+              username: authenticatedUsername, 
+              rooms: new Set(),
+              sessionId: sessionId
             });
-            ws.userId = authenticatedUserId;
-            ws.sessionId = sessionId;
-            console.log(`Authenticated user ${authenticatedUsername} (${authenticatedUserId}) connected`);
             
-            // Initialize friend data for user
-            initializeFriendData(authenticatedUserId);
+            console.log(`User ${authenticatedUsername} (${authenticatedUserId}) connected with session ${sessionId}`);
             
-            // Send authentication success
-            ws.send(JSON.stringify({
-              type: 'authSuccess',
-              userId: authenticatedUserId,
-              username: authenticatedUsername
-            }));
+            // Send current friends list
+            sendFriendsList(authenticatedUserId);
             
-            // Send friends list and pending requests to the user
-            broadcastFriendsList(authenticatedUserId);
+            // Send pending friend requests
             sendPendingRequests(authenticatedUserId);
-            broadcastRoomList(authenticatedUserId);
             
-            // Notify friends that this user is now online
-            const userFriends = friendships.get(authenticatedUserId) || new Set();
-            userFriends.forEach(friendId => {
-              broadcastFriendsList(friendId);
-            });
+            // Send current room list
+            sendRoomList(authenticatedUserId);
             break;
 
           case 'message':
-            // Handle message routing
-            if (data.roomKey) {
-              // Send to room members
-              const roomMembers = privateRooms.get(data.roomKey);
-              if (roomMembers) {
-                roomMembers.forEach((userId) => {
-                  if (userId !== data.from) {
-                    const user = connectedUsers.get(userId);
-                    if (user && user.ws.readyState === WebSocket.OPEN) {
-                      user.ws.send(JSON.stringify(data));
-                    }
-                  }
-                });
-              }
-            } else if (data.to) {
-              // Send to specific user - check if they are friends
-              const senderFriends = friendships.get(data.from) || new Set();
-              if (senderFriends.has(data.to)) {
-                const targetUser = connectedUsers.get(data.to);
-                if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
-                  targetUser.ws.send(JSON.stringify(data));
-                }
-              } else {
-                // Not friends, send error back to sender
-                const senderUser = connectedUsers.get(data.from);
-                if (senderUser && senderUser.ws.readyState === WebSocket.OPEN) {
-                  senderUser.ws.send(JSON.stringify({
-                    type: 'messageError',
-                    error: 'You can only send messages to friends',
-                    targetUser: data.to
-                  }));
-                }
-              }
-            } else {
-              // Broadcast to friends only (instead of all users)
-              const senderFriends = friendships.get(data.from) || new Set();
-              senderFriends.forEach((friendId) => {
-                const friendUser = connectedUsers.get(friendId);
-                if (friendUser && friendUser.ws.readyState === WebSocket.OPEN) {
-                  friendUser.ws.send(JSON.stringify(data));
-                }
-              });
-            }
+            handleMessage(data);
             break;
 
           case 'joinRoom':
-            // Handle room joining
-            const { roomKey, userId: joinUserId, isCreating = false } = data;
-            
-            console.log(`Processing joinRoom request: userId=${joinUserId}, roomKey=${roomKey}`);
-            
-            try {
-              // Validate room key
-              if (!roomKey || roomKey.length !== 6 || !/^\d{6}$/.test(roomKey)) {
-                console.log(`Invalid room key: ${roomKey}`);
-                const user = connectedUsers.get(joinUserId);
-                if (user && user.ws.readyState === WebSocket.OPEN) {
-                  user.ws.send(JSON.stringify({
-                    type: 'roomJoined',
-                    roomKey: roomKey,
-                    success: false,
-                    error: 'Invalid room key format'
-                  }));
-                }
-                break;
-              }
-              
-              // Check if room exists for joining (not creating)
-              const roomExists = privateRooms.has(roomKey);
-              
-              // Create room if it doesn't exist
-              if (!roomExists) {
-                privateRooms.set(roomKey, new Set());
-                console.log(`Created new room: ${roomKey}`);
-              }
-              
-              // Add user to room
-              privateRooms.get(roomKey).add(joinUserId);
-              
-              // Add room to user's room list
-              const user = connectedUsers.get(joinUserId);
-              if (user) {
-                user.rooms.add(roomKey);
-              }
-              
-              console.log(`User ${joinUserId} successfully joined room ${roomKey}`);
-              
-              // Notify user of successful join
-              if (user && user.ws.readyState === WebSocket.OPEN) {
-                user.ws.send(JSON.stringify({
-                  type: 'roomJoined',
-                  roomKey: roomKey,
-                  success: true,
-                  isCreated: isCreating || !roomExists // True if creating or if room didn't exist before
-                }));
-              }
-              
-              // Broadcast updated room list to all users
-              broadcastRoomListToAll();
-            } catch (error) {
-              console.error(`Error joining room: ${error.message}`);
-              const user = connectedUsers.get(joinUserId);
-              if (user && user.ws.readyState === WebSocket.OPEN) {
-                user.ws.send(JSON.stringify({
-                  type: 'roomJoined',
-                  roomKey: roomKey,
-                  success: false,
-                  error: error.message
-                }));
-              }
-            }
+            handleJoinRoom(data);
             break;
 
           case 'leaveRoom':
-            // Handle room leaving
-            const { roomKey: leaveRoomKey, userId: leaveUserId } = data;
-            
-            // Remove user from room
-            if (privateRooms.has(leaveRoomKey)) {
-              privateRooms.get(leaveRoomKey).delete(leaveUserId);
-              
-              // Remove empty rooms
-              if (privateRooms.get(leaveRoomKey).size === 0) {
-                privateRooms.delete(leaveRoomKey);
-              }
-            }
-            
-            // Remove room from user's room list
-            const leaveUser = connectedUsers.get(leaveUserId);
-            if (leaveUser) {
-              leaveUser.rooms.delete(leaveRoomKey);
-            }
-            
-            console.log(`User ${leaveUserId} left room ${leaveRoomKey}`);
-            
-            // Notify user of successful leave
-            if (leaveUser && leaveUser.ws.readyState === WebSocket.OPEN) {
-              leaveUser.ws.send(JSON.stringify({
-                type: 'roomLeft',
-                roomKey: leaveRoomKey
-              }));
-            }
-            
-            // Broadcast updated room list to all users
-            broadcastRoomListToAll();
+            handleLeaveRoom(data);
             break;
 
           case 'typing':
-            // Handle typing indicators
-            const { from, to, roomKey: typingRoomKey, isTyping } = data;
-            
-            if (typingRoomKey) {
-              // Send to room members
-              const roomMembers = privateRooms.get(typingRoomKey);
-              if (roomMembers) {
-                roomMembers.forEach((userId) => {
-                  if (userId !== from) {
-                    const user = connectedUsers.get(userId);
-                    if (user && user.ws.readyState === WebSocket.OPEN) {
-                      user.ws.send(JSON.stringify(data));
-                    }
-                  }
-                });
-              }
-            } else if (to) {
-              // Send to specific user - check if they are friends
-              const senderFriends = friendships.get(from) || new Set();
-              if (senderFriends.has(to)) {
-                const targetUser = connectedUsers.get(to);
-                if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
-                  targetUser.ws.send(JSON.stringify(data));
-                }
-              }
-            } else {
-              // Broadcast to friends only
-              const senderFriends = friendships.get(from) || new Set();
-              senderFriends.forEach((friendId) => {
-                const friendUser = connectedUsers.get(friendId);
-                if (friendUser && friendUser.ws.readyState === WebSocket.OPEN) {
-                  friendUser.ws.send(JSON.stringify(data));
-                }
-              });
-            }
+            handleTyping(data);
             break;
 
+          // Friend system message handlers
           case 'sendFriendRequest':
-            // Handle sending friend request
-            const { targetUserId } = data;
-            const senderId = data.from;
-            
-            // Initialize friend data structures if they don't exist
-            if (!friendRequests.has(targetUserId)) {
-              friendRequests.set(targetUserId, new Set());
-            }
-            if (!sentRequests.has(senderId)) {
-              sentRequests.set(senderId, new Set());
-            }
-            if (!friendships.has(senderId)) {
-              friendships.set(senderId, new Set());
-            }
-            if (!friendships.has(targetUserId)) {
-              friendships.set(targetUserId, new Set());
-            }
-            
-            // Check if already friends
-            if (friendships.get(senderId).has(targetUserId)) {
-              // Already friends, send error
-              const senderUser = connectedUsers.get(senderId);
-              if (senderUser && senderUser.ws.readyState === WebSocket.OPEN) {
-                senderUser.ws.send(JSON.stringify({
-                  type: 'friendRequestResult',
-                  success: false,
-                  error: 'Already friends with this user'
-                }));
-              }
-              break;
-            }
-            
-            // Check if request already sent
-            if (sentRequests.get(senderId).has(targetUserId)) {
-              // Request already sent, send error
-              const senderUser = connectedUsers.get(senderId);
-              if (senderUser && senderUser.ws.readyState === WebSocket.OPEN) {
-                senderUser.ws.send(JSON.stringify({
-                  type: 'friendRequestResult',
-                  success: false,
-                  error: 'Friend request already sent'
-                }));
-              }
-              break;
-            }
-            
-            // Add to pending requests
-            friendRequests.get(targetUserId).add(senderId);
-            sentRequests.get(senderId).add(targetUserId);
-            
-            // Notify sender of success
-            const senderUser = connectedUsers.get(senderId);
-            if (senderUser && senderUser.ws.readyState === WebSocket.OPEN) {
-              senderUser.ws.send(JSON.stringify({
-                type: 'friendRequestResult',
-                success: true,
-                message: 'Friend request sent successfully'
-              }));
-            }
-            
-            // Notify target user of new friend request
-            const targetUser = connectedUsers.get(targetUserId);
-            if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
-              targetUser.ws.send(JSON.stringify({
-                type: 'newFriendRequest',
-                from: senderId,
-                requestCount: friendRequests.get(targetUserId).size
-              }));
-            }
-            
-            console.log(`Friend request sent from ${senderId} to ${targetUserId}`);
+            handleSendFriendRequest(data);
             break;
 
           case 'acceptFriendRequest':
-            // Handle accepting friend request
-            const { requesterId } = data;
-            const accepterId = data.from;
-            
-            // Initialize if needed
-            if (!friendRequests.has(accepterId)) {
-              friendRequests.set(accepterId, new Set());
-            }
-            if (!sentRequests.has(requesterId)) {
-              sentRequests.set(requesterId, new Set());
-            }
-            if (!friendships.has(accepterId)) {
-              friendships.set(accepterId, new Set());
-            }
-            if (!friendships.has(requesterId)) {
-              friendships.set(requesterId, new Set());
-            }
-            
-            // Check if request exists
-            if (!friendRequests.get(accepterId).has(requesterId)) {
-              // No pending request, send error
-              const accepterUser = connectedUsers.get(accepterId);
-              if (accepterUser && accepterUser.ws.readyState === WebSocket.OPEN) {
-                accepterUser.ws.send(JSON.stringify({
-                  type: 'friendRequestResult',
-                  success: false,
-                  error: 'No pending friend request from this user'
-                }));
-              }
-              break;
-            }
-            
-            // Remove from pending requests
-            friendRequests.get(accepterId).delete(requesterId);
-            sentRequests.get(requesterId).delete(accepterId);
-            
-            // Add to friendships (both ways)
-            friendships.get(accepterId).add(requesterId);
-            friendships.get(requesterId).add(accepterId);
-            
-            // Notify both users
-            const accepterUser = connectedUsers.get(accepterId);
-            if (accepterUser && accepterUser.ws.readyState === WebSocket.OPEN) {
-              accepterUser.ws.send(JSON.stringify({
-                type: 'friendRequestAccepted',
-                friendId: requesterId,
-                requestCount: friendRequests.get(accepterId).size
-              }));
-              // Send updated friends list
-              broadcastFriendsList(accepterId);
-            }
-            
-            const requesterUser = connectedUsers.get(requesterId);
-            if (requesterUser && requesterUser.ws.readyState === WebSocket.OPEN) {
-              requesterUser.ws.send(JSON.stringify({
-                type: 'friendRequestAccepted',
-                friendId: accepterId
-              }));
-              // Send updated friends list
-              broadcastFriendsList(requesterId);
-            }
-            
-            console.log(`Friend request accepted: ${requesterId} and ${accepterId} are now friends`);
+            handleAcceptFriendRequest(data);
             break;
 
           case 'rejectFriendRequest':
-            // Handle rejecting friend request
-            const { rejectRequesterId } = data;
-            const rejecterId = data.from;
-            
-            // Initialize if needed
-            if (!friendRequests.has(rejecterId)) {
-              friendRequests.set(rejecterId, new Set());
-            }
-            if (!sentRequests.has(rejectRequesterId)) {
-              sentRequests.set(rejectRequesterId, new Set());
-            }
-            
-            // Remove from pending requests
-            friendRequests.get(rejecterId).delete(rejectRequesterId);
-            sentRequests.get(rejectRequesterId).delete(rejectRequesterId);
-            
-            // Notify rejector
-            const rejecterUser = connectedUsers.get(rejecterId);
-            if (rejecterUser && rejecterUser.ws.readyState === WebSocket.OPEN) {
-              rejecterUser.ws.send(JSON.stringify({
-                type: 'friendRequestRejected',
-                requesterId: rejectRequesterId,
-                requestCount: friendRequests.get(rejecterId).size
-              }));
-            }
-            
-            // Optionally notify requester (or keep it silent)
-            const rejectedRequesterUser = connectedUsers.get(rejectRequesterId);
-            if (rejectedRequesterUser && rejectedRequesterUser.ws.readyState === WebSocket.OPEN) {
-              rejectedRequesterUser.ws.send(JSON.stringify({
-                type: 'friendRequestRejected',
-                rejectedBy: rejecterId
-              }));
-            }
-            
-            console.log(`Friend request rejected: ${rejectRequesterId} -> ${rejecterId}`);
+            handleRejectFriendRequest(data);
             break;
 
           case 'getFriendsList':
-            // Send user's friends list
-            const friendsUserId = data.from;
-            broadcastFriendsList(friendsUserId);
+            sendFriendsList(data.from);
             break;
 
           case 'getPendingRequests':
-            // Send user's pending friend requests
-            const requestUserId = data.from;
-            sendPendingRequests(requestUserId);
+            sendPendingRequests(data.from);
             break;
+
+          default:
+            console.log('Unknown message type:', data.type);
         }
       } catch (error) {
-        console.error('Error parsing message:', error);
+        console.error('Error processing message:', error);
       }
     });
 
     ws.on('close', () => {
-      // Remove user from connected users and rooms
-      if (ws.userId) {
-        const user = connectedUsers.get(ws.userId);
-        if (user) {
-          // Remove user from all rooms
-          user.rooms.forEach((roomKey) => {
-            if (privateRooms.has(roomKey)) {
-              privateRooms.get(roomKey).delete(ws.userId);
-              // Remove empty rooms
-              if (privateRooms.get(roomKey).size === 0) {
+      console.log('WebSocket connection closed');
+      // Remove user from connected users
+      for (const [userId, userData] of connectedUsers.entries()) {
+        if (userData.ws === ws) {
+          console.log(`User ${userData.username} (${userId}) disconnected`);
+          connectedUsers.delete(userId);
+          
+          // Remove from all rooms
+          for (const roomKey of userData.rooms) {
+            const room = privateRooms.get(roomKey);
+            if (room) {
+              room.delete(userId);
+              if (room.size === 0) {
                 privateRooms.delete(roomKey);
               }
             }
-          });
+          }
+          
+          // Broadcast updated user list to friends
+          broadcastFriendsListToFriends(userId);
+          break;
         }
-        
-        // Notify friends that this user went offline
-        const userFriends = friendships.get(ws.userId) || new Set();
-        userFriends.forEach(friendId => {
-          broadcastFriendsList(friendId);
-        });
-        
-        connectedUsers.delete(ws.userId);
-        console.log(`User ${ws.userId} disconnected`);
-        broadcastRoomListToAll();
       }
     });
   });
 };
 
-const broadcastUserList = () => {
-  const userList = Array.from(connectedUsers.keys());
-  const message = JSON.stringify({
-    type: 'userList',
-    users: userList
-  });
+// Rest of your websocket functions remain the same...
+// (I'll continue with the rest of the functions)
 
-  connectedUsers.forEach((user) => {
-    if (user.ws.readyState === WebSocket.OPEN) {
-      user.ws.send(message);
+const handleMessage = (data) => {
+  const { from, to, roomKey, message } = data;
+  
+  if (roomKey) {
+    // Room message - broadcast to all users in the room
+    const room = privateRooms.get(roomKey);
+    if (room && room.has(from)) {
+      room.forEach(userId => {
+        const user = connectedUsers.get(userId);
+        if (user && user.ws.readyState === WebSocket.OPEN) {
+          user.ws.send(JSON.stringify({
+            type: 'message',
+            from: from,
+            message: message,
+            timestamp: data.timestamp,
+            roomKey: roomKey,
+            isPrivateRoom: true
+          }));
+        }
+      });
     }
-  });
+  } else if (to) {
+    // Direct message - check if users are friends
+    const senderFriends = friendships.get(from) || new Set();
+    
+    if (!senderFriends.has(to)) {
+      // Not friends - send error back to sender
+      const sender = connectedUsers.get(from);
+      if (sender && sender.ws.readyState === WebSocket.OPEN) {
+        sender.ws.send(JSON.stringify({
+          type: 'messageError',
+          error: 'You can only send messages to friends',
+          targetUser: to
+        }));
+      }
+      return;
+    }
+    
+    // Send to specific user (friend)
+    const targetUser = connectedUsers.get(to);
+    if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+      targetUser.ws.send(JSON.stringify({
+        type: 'message',
+        from: from,
+        message: message,
+        timestamp: data.timestamp,
+        isPrivate: true
+      }));
+    }
+    
+    // Echo back to sender
+    const sender = connectedUsers.get(from);
+    if (sender && sender.ws.readyState === WebSocket.OPEN) {
+      sender.ws.send(JSON.stringify({
+        type: 'message',
+        from: from,
+        message: message,
+        timestamp: data.timestamp,
+        isPrivate: true,
+        to: to,
+        isSelf: true
+      }));
+    }
+  }
 };
 
-const broadcastRoomList = (userId) => {
+const handleJoinRoom = (data) => {
+  const { userId, roomKey, isCreating } = data;
+  
+  if (!roomKey || roomKey.length !== 6 || !/^\d{6}$/.test(roomKey)) {
+    const user = connectedUsers.get(userId);
+    if (user && user.ws.readyState === WebSocket.OPEN) {
+      user.ws.send(JSON.stringify({
+        type: 'roomJoined',
+        success: false,
+        error: 'Invalid room key format'
+      }));
+    }
+    return;
+  }
+
   const user = connectedUsers.get(userId);
-  if (!user || user.ws.readyState !== WebSocket.OPEN) return;
+  if (!user) {
+    console.error('User not found:', userId);
+    return;
+  }
 
-  const userRooms = Array.from(user.rooms).map(roomKey => ({
-    key: roomKey,
-    memberCount: privateRooms.get(roomKey)?.size || 0
-  }));
+  // Create room if it doesn't exist or if explicitly creating
+  if (!privateRooms.has(roomKey)) {
+    privateRooms.set(roomKey, new Set());
+  }
 
-  user.ws.send(JSON.stringify({
-    type: 'roomList',
-    rooms: userRooms
-  }));
+  const room = privateRooms.get(roomKey);
+  room.add(userId);
+  user.rooms.add(roomKey);
+
+  console.log(`User ${user.username} ${isCreating ? 'created' : 'joined'} room ${roomKey}`);
+
+  // Send success response
+  if (user.ws.readyState === WebSocket.OPEN) {
+    user.ws.send(JSON.stringify({
+      type: 'roomJoined',
+      roomKey: roomKey,
+      success: true,
+      isCreated: isCreating
+    }));
+  }
+
+  // Send updated room list to user
+  sendRoomList(userId);
 };
 
-const broadcastRoomListToAll = () => {
-  connectedUsers.forEach((user) => {
-    broadcastRoomList(user.userId);
-  });
+const handleLeaveRoom = (data) => {
+  const { userId, roomKey } = data;
+  
+  const user = connectedUsers.get(userId);
+  if (!user) return;
+
+  const room = privateRooms.get(roomKey);
+  if (room) {
+    room.delete(userId);
+    user.rooms.delete(roomKey);
+    
+    // Remove room if empty
+    if (room.size === 0) {
+      privateRooms.delete(roomKey);
+    }
+    
+    console.log(`User ${user.username} left room ${roomKey}`);
+  }
+
+  // Send updated room list
+  sendRoomList(userId);
+  
+  // Confirm room left
+  if (user.ws.readyState === WebSocket.OPEN) {
+    user.ws.send(JSON.stringify({
+      type: 'roomLeft',
+      roomKey: roomKey
+    }));
+  }
 };
 
-// Friend system helper functions
-const broadcastFriendsList = (userId) => {
+const handleTyping = (data) => {
+  const { from, to, roomKey, isTyping } = data;
+  
+  if (roomKey) {
+    // Broadcast typing status to room members
+    const room = privateRooms.get(roomKey);
+    if (room && room.has(from)) {
+      room.forEach(userId => {
+        if (userId !== from) {
+          const user = connectedUsers.get(userId);
+          if (user && user.ws.readyState === WebSocket.OPEN) {
+            user.ws.send(JSON.stringify({
+              type: 'typing',
+              from: from,
+              isTyping: isTyping,
+              roomKey: roomKey
+            }));
+          }
+        }
+      });
+    }
+  } else if (to) {
+    // Send typing status to specific user
+    const targetUser = connectedUsers.get(to);
+    if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+      targetUser.ws.send(JSON.stringify({
+        type: 'typing',
+        from: from,
+        isTyping: isTyping
+      }));
+    }
+  }
+};
+
+// Friend system functions
+const handleSendFriendRequest = (data) => {
+  const { from, targetUserId } = data;
+  
+  console.log(`Friend request from ${from} to ${targetUserId}`);
+  
+  // Check if users are already friends
+  const senderFriends = friendships.get(from) || new Set();
+  if (senderFriends.has(targetUserId)) {
+    sendFriendRequestResult(from, false, 'You are already friends with this user');
+    return;
+  }
+  
+  // Check if request already exists
+  const targetRequests = friendRequests.get(targetUserId) || new Set();
+  if (targetRequests.has(from)) {
+    sendFriendRequestResult(from, false, 'Friend request already sent');
+    return;
+  }
+  
+  // Check if sender has already sent a request
+  const senderSentRequests = sentRequests.get(from) || new Set();
+  if (senderSentRequests.has(targetUserId)) {
+    sendFriendRequestResult(from, false, 'Friend request already sent');
+    return;
+  }
+  
+  // Add to pending requests
+  if (!friendRequests.has(targetUserId)) {
+    friendRequests.set(targetUserId, new Set());
+  }
+  if (!sentRequests.has(from)) {
+    sentRequests.set(from, new Set());
+  }
+  
+  friendRequests.get(targetUserId).add(from);
+  sentRequests.get(from).add(targetUserId);
+  
+  // Notify target user if online
+  const targetUser = connectedUsers.get(targetUserId);
+  if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+    const requestCount = friendRequests.get(targetUserId).size;
+    targetUser.ws.send(JSON.stringify({
+      type: 'newFriendRequest',
+      from: from,
+      requestCount: requestCount
+    }));
+    
+    // Send updated pending requests
+    sendPendingRequests(targetUserId);
+  }
+  
+  // Confirm to sender
+  sendFriendRequestResult(from, true, 'Friend request sent successfully');
+  
+  // Send updated pending requests to sender
+  sendPendingRequests(from);
+};
+
+const handleAcceptFriendRequest = (data) => {
+  const { from, requesterId } = data;
+  
+  console.log(`${from} accepting friend request from ${requesterId}`);
+  
+  // Remove from pending requests
+  const userRequests = friendRequests.get(from) || new Set();
+  const requesterSentRequests = sentRequests.get(requesterId) || new Set();
+  
+  if (!userRequests.has(requesterId)) {
+    console.log('Friend request not found');
+    return;
+  }
+  
+  userRequests.delete(requesterId);
+  requesterSentRequests.delete(from);
+  
+  // Add to friendships (bidirectional)
+  if (!friendships.has(from)) {
+    friendships.set(from, new Set());
+  }
+  if (!friendships.has(requesterId)) {
+    friendships.set(requesterId, new Set());
+  }
+  
+  friendships.get(from).add(requesterId);
+  friendships.get(requesterId).add(from);
+  
+  console.log(`${from} and ${requesterId} are now friends`);
+  
+  // Notify both users
+  const accepter = connectedUsers.get(from);
+  const requester = connectedUsers.get(requesterId);
+  
+  if (requester && requester.ws.readyState === WebSocket.OPEN) {
+    const requestCount = friendRequests.get(requesterId)?.size || 0;
+    requester.ws.send(JSON.stringify({
+      type: 'friendRequestAccepted',
+      friendId: from,
+      requestCount: requestCount
+    }));
+  }
+  
+  // Send updated friends lists and pending requests
+  sendFriendsList(from);
+  sendFriendsList(requesterId);
+  sendPendingRequests(from);
+  sendPendingRequests(requesterId);
+};
+
+const handleRejectFriendRequest = (data) => {
+  const { from, rejectRequesterId } = data;
+  
+  console.log(`${from} rejecting friend request from ${rejectRequesterId}`);
+  
+  // Remove from pending requests
+  const userRequests = friendRequests.get(from) || new Set();
+  const requesterSentRequests = sentRequests.get(rejectRequesterId) || new Set();
+  
+  userRequests.delete(rejectRequesterId);
+  requesterSentRequests.delete(from);
+  
+  // Notify requester if online
+  const requester = connectedUsers.get(rejectRequesterId);
+  if (requester && requester.ws.readyState === WebSocket.OPEN) {
+    requester.ws.send(JSON.stringify({
+      type: 'friendRequestRejected',
+      rejectedBy: from
+    }));
+  }
+  
+  // Send updated pending requests
+  sendPendingRequests(from);
+  sendPendingRequests(rejectRequesterId);
+};
+
+const sendFriendRequestResult = (userId, success, message) => {
+  const user = connectedUsers.get(userId);
+  if (user && user.ws.readyState === WebSocket.OPEN) {
+    user.ws.send(JSON.stringify({
+      type: 'friendRequestResult',
+      success: success,
+      message: message
+    }));
+  }
+};
+
+const sendFriendsList = (userId) => {
   const user = connectedUsers.get(userId);
   if (!user || user.ws.readyState !== WebSocket.OPEN) return;
   
-  // Get user's friends who are currently online
   const userFriends = friendships.get(userId) || new Set();
-  const onlineFriends = [];
+  const friendsList = Array.from(userFriends);
   
-  userFriends.forEach(friendId => {
-    if (connectedUsers.has(friendId)) {
-      onlineFriends.push(friendId);
-    }
-  });
+  console.log(`Sending friends list to ${user.username}:`, friendsList);
   
   user.ws.send(JSON.stringify({
     type: 'friendsList',
-    friends: onlineFriends
+    friends: friendsList
   }));
 };
 
@@ -557,30 +489,38 @@ const sendPendingRequests = (userId) => {
   const user = connectedUsers.get(userId);
   if (!user || user.ws.readyState !== WebSocket.OPEN) return;
   
-  const pendingRequests = friendRequests.get(userId) || new Set();
-  const sentRequestsSet = sentRequests.get(userId) || new Set();
+  const incoming = Array.from(friendRequests.get(userId) || new Set());
+  const sent = Array.from(sentRequests.get(userId) || new Set());
+  const requestCount = incoming.length;
+  
+  console.log(`Sending pending requests to ${user.username}: incoming=${incoming.length}, sent=${sent.length}`);
   
   user.ws.send(JSON.stringify({
     type: 'pendingRequests',
-    incoming: Array.from(pendingRequests),
-    sent: Array.from(sentRequestsSet),
-    requestCount: pendingRequests.size
+    incoming: incoming,
+    sent: sent,
+    requestCount: requestCount
   }));
 };
 
-// Initialize friend data for new user
-const initializeFriendData = (userId) => {
-  if (!friendships.has(userId)) {
-    friendships.set(userId, new Set());
-  }
-  if (!friendRequests.has(userId)) {
-    friendRequests.set(userId, new Set());
-  }
-  if (!sentRequests.has(userId)) {
-    sentRequests.set(userId, new Set());
-  }
+const broadcastFriendsListToFriends = (userId) => {
+  const userFriends = friendships.get(userId) || new Set();
+  
+  userFriends.forEach(friendId => {
+    sendFriendsList(friendId);
+  });
 };
 
-module.exports = {
-  initWebSocket,
+const sendRoomList = (userId) => {
+  const user = connectedUsers.get(userId);
+  if (!user || user.ws.readyState !== WebSocket.OPEN) return;
+
+  const userRooms = Array.from(user.rooms);
+  
+  user.ws.send(JSON.stringify({
+    type: 'roomList',
+    rooms: userRooms
+  }));
 };
+
+module.exports = { initWebSocket };
