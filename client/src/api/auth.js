@@ -1,4 +1,6 @@
-const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = process.env.NODE_ENV === 'production'
+  ? 'https://e2ee-chatapp.onrender.com/api'  // Your live server URL
+  : 'http://localhost:3001/api';
 
 class AuthClient {
   constructor() {
@@ -7,6 +9,9 @@ class AuthClient {
 
   async register(username, password, email = null) {
     try {
+      console.log('Attempting registration to:', `${API_BASE_URL}/register`);
+      console.log('NODE_ENV:', process.env.NODE_ENV);
+      
       const response = await fetch(`${API_BASE_URL}/register`, {
         method: 'POST',
         headers: {
@@ -15,11 +20,23 @@ class AuthClient {
         body: JSON.stringify({ username, password, email }),
       });
 
+      console.log('Registration response status:', response.status);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
       const result = await response.json();
+      console.log('Registration result:', result);
       return result;
     } catch (error) {
       console.error('Registration error:', error);
-      return { success: false, error: 'Network error during registration' };
+      console.error('Error details:', {
+        message: error.message,
+        stack: error.stack,
+        name: error.name
+      });
+      return { success: false, error: `Network error: ${error.message}` };
     }
   }
 
