@@ -1,18 +1,37 @@
 const express = require('express');
 const http = require('http');
-const cors = require('cors');
+
+console.log('Starting server...');
+
+try {
+  const { initWebSocket } = require('./websocket');
+  const { initAuth, registerUser, loginUser, validateSession, logoutUser, getUserProfile, updateUserProfile } = require('./auth');
+  console.log('Modules loaded successfully');
+} catch (error) {
+  console.error('Error loading modules:', error);
+  process.exit(1);
+}
+
 const { initWebSocket } = require('./websocket');
 const { initAuth, registerUser, loginUser, validateSession, logoutUser, getUserProfile, updateUserProfile } = require('./auth');
 
 const app = express();
 const server = http.createServer(app);
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Manual CORS middleware (instead of cors package)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
 
-// Initialize authentication system
-initAuth();
+app.use(express.json());
 
 // Authentication routes
 app.post('/api/register', async (req, res) => {
@@ -133,15 +152,38 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Initialize WebSocket server
-initWebSocket(server);
-
 const PORT = process.env.PORT || 3001;
 
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-  console.log('WebSocket server is ready for connections');
-  console.log('Authentication system is active');
+// Add error handling for server startup
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
 });
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+try {
+  // Initialize WebSocket server
+  console.log('Initializing WebSocket server...');
+  initWebSocket(server);
+  console.log('WebSocket server initialized');
+
+  // Initialize authentication system
+  console.log('Initializing authentication system...');
+  initAuth();
+  console.log('Authentication system initialized');
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on port ${PORT}`);
+    console.log('WebSocket server is ready for connections');
+    console.log('Authentication system is active');
+  });
+} catch (error) {
+  console.error('Server startup error:', error);
+  process.exit(1);
+}
 
 module.exports = { app, server };
