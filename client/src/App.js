@@ -111,22 +111,39 @@ const App = () => {
   const [wsClient] = useState(new WebSocketClient());
   const { publicKey, privateKey } = generateKeyPair();
 
-  // Check for saved username on app start
+  // Check for saved session on app start
   useEffect(() => {
     // Initialize sound manager
     window.soundManager = soundManager;
     
-    const savedUsername = localStorage.getItem('secureChat_username');
-    if (savedUsername) {
-      setCurrentUser(savedUsername);
-      setIsLoggedIn(true);
-      connectToChat(savedUsername);
-    } else {
-      setShowLoginModal(true);
-    }
+    const checkSession = async () => {
+      try {
+        // Import AuthClient
+        const AuthClient = (await import('./api/auth')).default;
+        const authClient = new AuthClient();
+        
+        // Check if we have a valid session
+        const result = await authClient.validateSession();
+        
+        if (result.success) {
+          // Valid session - auto-login
+          setCurrentUser(result.username);
+          setIsLoggedIn(true);
+          connectToChat(result.username);
+        } else {
+          // No valid session - show login
+          setShowLoginModal(true);
+        }
+      } catch (error) {
+        console.error('Session validation error:', error);
+        setShowLoginModal(true);
+      }
+    };
+    
+    checkSession();
   }, []);
 
-  const connectToChat = (username) => {
+  const connectToChat = async (username) => {
     // Setup WebSocket client
     wsClient.onMessageReceived = (data) => {
       const decryptedMessage = decrypt(data.message, privateKey);
@@ -253,27 +270,84 @@ const App = () => {
       return originalConnect(userId);
     };
 
-    wsClient.connect(username);
+    // Get session ID for WebSocket authentication
+    try {
+      const AuthClient = (await import('./api/auth')).default;
+      const authClient = new AuthClient();
+      const sessionId = authClient.getSessionId();
+      wsClient.connect(username, sessionId);
+    } catch (error) {
+      console.error('Error getting session ID:', error);
+      wsClient.connect(username); // Fallback without session
+    }
   };
 
-  const handleLogin = async (username) => {
-    // Save username to localStorage
-    localStorage.setItem('secureChat_username', username);
-    setCurrentUser(username);
-    setIsLoggedIn(true);
-    setShowLoginModal(false);
-    
-    // Clear previous connections but keep message history
-    setConnectedUsers([]);
-    setSelectedContact(null);
-    setSelectedRoom(null);
-    setPrivateRooms([]);
-    
-    // Connect to chat
-    connectToChat(username);
+  const handleLogin = async (username, password) => {
+    try {
+      // Import AuthClient
+      const AuthClient = (await import('./api/auth')).default;
+      const authClient = new AuthClient();
+      
+      // Attempt login
+      const result = await authClient.login(username, password);
+      
+      if (result.success) {
+        // Save username to localStorage
+        localStorage.setItem('secureChat_username', username);
+        setCurrentUser(username);
+        setIsLoggedIn(true);
+        setShowLoginModal(false);
+        
+        // Clear previous connections but keep message history
+        setConnectedUsers([]);
+        setSelectedContact(null);
+        setSelectedRoom(null);
+        setPrivateRooms([]);
+        
+        // Connect to chat
+        connectToChat(username);
+      } else {
+        throw new Error(result.error || 'Login failed');
+      }
+    } catch (error) {
+      console.error('Login error:', error);
+      throw error; // Re-throw so LoginModal can handle it
+    }
   };
 
-  const handleLogout = () => {
+  const handleRegister = async (username, password, email) => {
+    try {
+      // Import AuthClient
+      const AuthClient = (await import('./api/auth')).default;
+      const authClient = new AuthClient();
+      
+      // Attempt registration
+      const result = await authClient.register(username, password, email);
+      
+      if (result.success) {
+        // Auto-login after successful registration
+        await handleLogin(username, password);
+      } else {
+        throw new Error(result.error || 'Registration failed');
+      }
+    } catch (error) {
+      console.error('Registration error:', error);
+      throw error; // Re-throw so LoginModal can handle it
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      // Import AuthClient
+      const AuthClient = (await import('./api/auth')).default;
+      const authClient = new AuthClient();
+      
+      // Logout from server
+      await authClient.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+    
     // Clear localStorage
     localStorage.removeItem('secureChat_username');
     
@@ -378,7 +452,11 @@ const App = () => {
   if (!isLoggedIn) {
     return (
       <ThemeProvider>
-        <LoginModal onLogin={handleLogin} isVisible={showLoginModal} />
+        <LoginModal 
+          onLogin={handleLogin} 
+          onRegister={handleRegister} 
+          isVisible={showLoginModal} 
+        />
       </ThemeProvider>
     );
   }
