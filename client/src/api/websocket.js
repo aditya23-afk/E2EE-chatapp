@@ -18,16 +18,24 @@ class WebSocketClient {
         this.onMessageError = null;
     }
 
-    connect(userId) {
+    connect(userId, sessionId = null) {
         this.userId = userId;
-        this.ws = new WebSocket('ws://localhost:3001');
+        this.sessionId = sessionId;
+
+        // Determine WebSocket URL based on environment
+        const wsUrl = process.env.NODE_ENV === 'production'
+            ? 'wss://e2ee-chatapp.onrender.com'  // Your live server URL
+            : 'ws://localhost:3001';
+
+        this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
             console.log('Connected to WebSocket server');
-            // Register user with server
+            // Register user with server (include session ID if available)
             this.send({
                 type: 'register',
-                userId: this.userId
+                userId: this.userId,
+                sessionId: this.sessionId
             });
         };
 
